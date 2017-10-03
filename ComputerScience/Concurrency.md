@@ -510,8 +510,128 @@ public class BoundedBuffer {
 ```
 
 ## Semaphore
-## Publisher Subscriber
-## Observable and Observer
+
+Mutex allows mutually exclusive access to one single thread. There are usecases where the access can be given
+concurrently to a restricted number of threads simultaneously and the shared resource can handle. For example, consider
+the above printer we dealt with. If the printer can handle more than one job at time but not more than 5 jobs, such a
+concurrency control can be employed using Semaphores. Mutex is nothing but a semaphore with just one access.
+
+A typical usage of semaphore can be implemented as follows
+   1. create a semaphore with upper bound capacity
+   1. call acquire. 
+   1. if there are enough place in semaphore, the thread will continue executing. If not, it will wait until some other
+      thread releases the lock.
+   1. use the printer
+   1. call release. This releases the resource back to pool available for other threads
+
+An example of a printer
+
+```java
+import java.util.concurrent.*;
+import java.util.*;
+
+public class SemaphoreExample {
+    static class Printer {
+        Queue<Integer> jobQueue = new LinkedList<>();
+        Semaphore sem = new Semaphore(5, true /*fairness*/);
+        ExecutorService ex = Executors.newFixedThreadPool(15);
+        void postJob(int job) {
+            try {
+                sem.acquire();
+                jobQueue.add(job);
+                System.out.println("Posted job: " + job);
+            }catch (Exception e) { e.printStackTrace(); }
+        }
+        void powerup() {
+            ex.execute(() -> {
+                sleep(5000); // printer warming up
+                while(true) {
+                    if(!jobQueue.isEmpty()) {
+                        int x = jobQueue.remove();
+                        System.out.println("Executing job: " + x);
+                        sleep(1000);
+                        sem.release();
+                    }
+                    sleep(1000);
+                }
+            });
+        }
+        void powerdown(int waitTime, TimeUnit units) { 
+            try {
+                ex.shutdown(); 
+                ex.awaitTermination(waitTime, units);
+            } catch (InterruptedException e) { e.printStackTrace(); }
+        }
+    }
+
+    public static void sleep(int msecs) {
+        try { Thread.currentThread().sleep(msecs); } 
+        catch (InterruptedException e) { e.printStackTrace(); }
+    }
+
+    public static void main (String [] args) {
+        Printer printer = new Printer();
+        printer.powerup();
+        for(int i=1; i < 10; i++) {
+           printer.postJob(i*100); 
+        }
+        printer.powerdown(5, TimeUnit.MINUTES);
+    }
+}
+```
+
+## Reader Writer Locks
+In some situations, your applications may be doing more read operations than a write operation to a shared resource. The
+shared resource doesn't change much. In that case, using a mutex is costlier as all reader threads will be blocked
+until current reading thread finishes. Since the resource is not modified, it doesn't need a lock. 
+
+But, when a thread writes, the other threads has to wait for the thread to complete otherwise they will be getting a
+stale copy or worst a inconsistent value if it interleaves the writer's critical section
+
+Notes:
+
+   * If the read operations are really short lived, it doesn't offset the overhead of read write lock
+   * If writes are more, obviously it'll make all threads spend time exclusively on thread defeating the purpose of read
+     write locks
+   * When a write lock is released and there are both new read lock and write lock are pending. Which one to give
+     preference? Most commonly, the write lock is given
+   * Java Implementation of ReentrantReadWriteLock
+       - Doesn't implement Read/Write preference. Instead implements a fairness parameter.  If chosen, when a write lock
+         is released, it gives preference to a longest waiting writer thread waiting more time than all the read. If
+         group of reader threads waits loger, then that group will be assigned the lock making writer wait
+       - With fairness setting, the write lock will block unless both write lock and read lock are free. If read is in
+         currently progress, writer has to wait until all reads are done
+       - Without fairness setting, the order of read/write lock is unspecified. Continously contending thread may be
+         postponed for longer period. 
+       - non-fairness gives better throughput
+       - A writer can acquire a read lock, not vice versa.
+       - A write lock can be downgraded to read lock, again not vice versa.
+       - writeLock supports condition so that you can await and signal and not read lock.
+
+Example in Java. A cache which is read more often then updated
+```
+import java.util.concurrent.*;
+import java.util.concurrent.locks.*;
+public class Cache {
+    ReadWriteLock lock = new ReentrantReadWriteLock();
+    void updateCache() { /*...*/ }
+    boolean isDirty() { /*...*/ return false; }
+    void getEntry(String itemId) {
+        lock.readLock().lock();
+        if( isDirty()) {
+            lock.readLock().unlock();// a reader can't acquire a write lock, so release first
+            lock.writeLock().lock(); 
+            updateCache();
+            lock.writeLock().unlock();
+        }
+        lock.readLock().unlock();
+    }
+}
+```
+### StampedLock
+Similar to Read Write Lock above except it returns a stamp value, which can later be used for unlock or check if still
+lock is valid. It also supports optimistic lock mode.
+
 ## Deadlock
 ### Detection
 ### Prevention
@@ -523,11 +643,108 @@ public class BoundedBuffer {
 ## Actor Model
 ## Reactive
 ## Main Loop
+## Publisher Subscriber
+## Observable and Observer
+
+# Thread Safety
+
+## Safely Publishing Objects
+
+Reference: [Book Java Concurrency and Practice](https://www.amazon.in/Java-Concurrency-Practice-Tim-Peierls-ebook/dp/B004V9OA84)
+
+Publishing a object here means making them available to other objects.  Watch out for unsafe publishing. For example
+
+```java
+public class Books {
+    public static ArrayList<Book> books;
+    public Books() { books = new ArrayList<>(); }  
+}
+```
+Even before the object is constructed, we are publishing the books variable which can be accessed by anyone and that
+will be null until the constructor completes.
+
+Similarly follow the best practices so as not to publish objects partially, before fully constructed. Once published,
+the reference may be kept outside or misused.
+
+   * never subscribe to any listener in constructor. The `this` reference pointer escapes
+   * never start a thread in constructor. Since object is not fully constructed, the thread will have reference to the
+     partial state. Instead construct the thread but start it outside constructor
+   * Use private constructor and public factory method for properly publishing objects
+   * Publish the reference and fully constructed object at the same time
+      - by using final field of a fully constructured object
+      - by storing into a volatile  varilable or AtomicReference
+      - using static initializer
+      - using synchronization primitives
+
+
 # Lock Free Programming
-## Non-blocking objects, structures and algorithms
-### Compare and Swap: AtomicInteger
+
+Concurrency  provides benefit in lot of cases. But, a mis-behaving concurrent program is often very hard to debug.
+Since concurrent execution order of statements are non-deterministic, it is very difficult to reason about a program
+just looking at small portion of logic. 
+
+Also, concurrency requires the access to common resource is synchronized and sometimes we may need to have deterministic
+order. In those cases, we have to sequence the program through a sequencer making them single threaded, which defeats
+the advantages of concurrent programming.
+
+So where ever possible, try to use lock free primitives and avoid concurrency which requires concurrency control.  New
+programming paradigms are emerging where concurrency controls are minimized and same use case can be achieved without
+resorting to complex ordering techniques.  For example, message passing instead of shared memory, immutable data,
+immutable data structures are techniques used for avoiding shared state.
+
+The advantage of avoiding synchronization or locks is greater freedom to run concurrent threads/process without worrying
+about race conditions or invalid access patterns.  With mutli core processes and distributed systems, these kind of
+programs are easy to reason about and can easily parallelized across cores or machines.
+
+Let us see some techniques to avoid locks and synchronization.
+
+## Compare and Swap: AtomicInteger, AtomicLong, AtomicBoolean, AtomicReference, LongAdder, LongAccumulator
+
+Simplest technique to avoid locks is to use atomic data structures.  These structures uses machine instructions which
+execute in a single pass, not allowing multiple execution paths interleave.
+
+Java's AtomicInteger offers an integer which can be increated and read in a single call.
+
+```java
+AtomicInteger value = new AtomicInteger(0);
+System.out.println(value.incrementAndGet());
+```
+It also supports various methods `updateAndGet(n -> n+1)`, `accumulateAndGet(i, (x,y) -> x+y)`
+
+## Volatile Fields
+Java's volatile keyword makes the value of a variable  stored in main memory  instead of a cpu cache. i.e. when a thread
+is run a multi-core machine, each cpu has its own registry and cache.  The value can be copied into these registers.  An
+update to these values may not be visible to other threads. Volatile makes it to use the main memory instead of cache so
+that an update of the variable is immediately visible to other threads.
+
+Note that, this still does not guarantee synchronization if the writer depends on previous value of volatile. i.e. read
+and write are different operations which can interleave.
+
+When a update to a volatile is done, it's not just this variable, all other volatile values also gets flushed to main
+memory.
+
+To make full use of volatile, use Atomic variables we discussed in previous section. Or more useful if only one thread
+updates and other threads only reads the value very often.
+
+Careful evaluation is needed before using volatile, because accessing from cpu cache is faster.
+
+## Final fields
+When many of the class fields are constants and does not change during course of the program, it is better to mark them
+as final. Marking them final guarantees that these variables are initialized immediately after constructor completes.
+
+## Immutable
+Immutable objects can never change stage. Hence they are free to use across multiple threads without worrying about
+synchronization. For threads which want a mutation of the object, they can mutate by copying. Example for such object is
+Java's String objects. 
+
+In Java, a class can be immutable by declaring all fields as final and class itself as final and internal state is not
+escaped outside the class during construction or there times.
+
+## Thread local storage
+When you store the object within a thread local storage and never shared or escape them out of scope, you can freely use
+it without synchronization
+
 ### Fork Join
-## Volatile and Final Fields
 ## Immutablity
 ## Lock Free Data Structures
 ## Message Passing
