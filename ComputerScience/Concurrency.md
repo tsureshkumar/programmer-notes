@@ -734,11 +734,10 @@ as final. Marking them final guarantees that these variables are initialized imm
 
 ## Immutable
 Immutable objects can never change stage. Hence they are free to use across multiple threads without worrying about
-synchronization. For threads which want a mutation of the object, they can mutate by copying. Example for such object is
+synchronization. For threads which want a mutation of the object, they can mutate by copying only. Example for such object is
 Java's String objects. 
 
-In Java, a class can be immutable by declaring all fields as final and class itself as final and internal state is not
-escaped outside the class during construction or there times.
+In Java, a class can be immutable by marking the class final and declaring all fields as well as final. And make sure that internal state or reference is not escaped outside the class during construction or other methods.
 
 ## Thread local storage
 When you store the object within a thread local storage and never shared or escape them out of scope, you can freely use
